@@ -1,17 +1,18 @@
 import numpy as np
 import os
 import sys
-import cv2
-from skimage import io
-from matplotlib import pyplot as plt
+import argparse
 import random
 from time import time
 from tqdm import tqdm
-import dlib
 from math import sqrt
-import argparse
+import dlib
+import cv2
+from skimage import io
 from skimage.color import rgb2hsv, hsv2rgb, rgb2yuv, yuv2rgb
 from skimage.exposure import equalize_hist, equalize_adapthist
+from skimage.measure import find_contours
+from matplotlib import pyplot as plt
 
 from keras.models import Sequential, Model
 from keras.layers import *
@@ -250,6 +251,15 @@ def get_normals(pts):
     norm_y /= len3
     norm_x /= len3
     norms[33] = (-norm_y, -norm_x)
+    
+    #4head
+    for i in range(68, 75):
+        norm_x = pts[16][0] - pts[0][0]
+        norm_y = pts[16][1] - pts[0][1]
+        len1 = sqrt(norm_x*norm_x + norm_y*norm_y)
+        norm_x /= len1
+        norm_y /= len1
+        norms[i] = (-norm_y, -norm_x)
     #finally return
     return norms
 
@@ -271,7 +281,7 @@ def img_sparse_triang(pts_src, size):
     for i in (1,4,7,9,12,15):
         subdiv.insert(pts[i])
     for i, p in enumerate(pts[17:]):
-        if i+17 not in (29, 32, 34, 60, 64):
+        if i+17 not in (29, 32, 34, 60, 64, 68, 74):
             subdiv.insert(p)
     triangles = subdiv.getTriangleList()
     return triangles, pts
@@ -566,7 +576,31 @@ class Morpher:
             morphTriangle(img1, imgMorphNorm, t1, t, cv2.INTER_CUBIC)
             new_triangles.append(t)
         self.pts = new_pts
-        return imgMorphNorm.clip(0,255).astype(np.uint8), new_triangles     
+        return imgMorphNorm.clip(0,255).astype(np.uint8), new_triangles
+        
+    def forhead_height(self, img, triangles, k):
+        new_pts = self.pts.copy()
+        k = k / 10.
+        img1 = np.float32(img.copy())
+        imgMorphNorm = np.zeros(img1.shape, dtype = img1.dtype)
+        new_triangles = []
+        for t1 in triangles:
+            t = []
+            for pt in t1:
+                idx = pts_ind(self.pts, pt)
+                if idx in range(69, 74):
+                    dist1 = sqrt((self.pts[70][0] - self.pts[19][0])**2 + (self.pts[70][1] - self.pts[19][1])**2)
+                    dist2 = sqrt((self.pts[72][0] - self.pts[24][0])**2 + (self.pts[72][1] - self.pts[24][1])**2)
+                    dist = 0.3 * (dist1 + dist2) / 2
+                    new_x = pt[0] + int(k * dist * norms[idx][0])
+                    new_y = pt[1] + int(k * dist * norms[idx][1])
+                    t.append((new_x, new_y))
+                else:
+                    t.append(pt)
+            morphTriangle(img1, imgMorphNorm, t1, t, cv2.INTER_CUBIC)
+            new_triangles.append(t)
+        self.pts = new_pts
+        return imgMorphNorm.clip(0,255).astype(np.uint8), new_triangles        
 
 def make_face_triang(pts_src, size):
     rect = (0, 0, size[1], size[0])
@@ -715,20 +749,21 @@ args = parser.parse_args()
 
 #initialize the demands
 morph_demands = {'eyebrows': 0,
-                 'eyes_size': 3,
-                 'nose_length': 4,
-                 'nose_width': -3,
-                 'smile_on': 2,
-                 'lips_thicc': 4,
-                 'lips_width': -1,
-                 'skull_width': -6,
-                 'jaw_width': -6,
-                 'chin_height': -6}
+                 'eyes_size': 0,
+                 'nose_length': 0,
+                 'nose_width': 0,
+                 'smile_on': 0,
+                 'lips_thicc': 0,
+                 'lips_width': 0,
+                 'skull_width': 0,
+                 'jaw_width': 0,
+                 'chin_height': 0,
+                 'forhead_height': 10}
 
-skin_demands = {'contrast': 5,
-                'skin_tone': -2,
+skin_demands = {'contrast': 0,
+                'skin_tone': 0,
                 'lips_tone': 0,
-                'smooth': 2}
+                'smooth': 0}
 
 #read the input image and get its shape
 img = io.imread(args.input)
@@ -743,6 +778,23 @@ dlib_pts = []
 for pt in parts:
     dlib_pts.append(np.array([pt.x, pt.y]))
 dlib_pts = np.array(dlib_pts)
+
+#mask from triangulation
+face_triangles = make_face_triang(dlib_pts, (H,W))
+triang_mask = get_triang_mask(img.shape, face_triangles)
+
+# NN segmentation
+model = FCN()
+model.load_weights("Keras_FCN8s_face_seg_YuvalNirkin.h5")
+nn_mask = get_nn_mask(img, model)
+
+#get hairline from NN mask
+contour = find_contours(nn_mask[:,:,0], 0.5)[0].astype(np.int16)
+contour = contour[np.logical_or(np.logical_and(contour[:,0] < dlib_pts[0][1], np.abs(contour[:,1] - dlib_pts[0][0]) <= np.abs(contour[:,1] - dlib_pts[16][0])),
+                                np.logical_and(contour[:,0] < dlib_pts[16][1], np.abs(contour[:,1] - dlib_pts[0][0]) > np.abs(contour[:,1] - dlib_pts[16][0])))]
+contour = contour[np.linspace(0, len(contour)-1, num=9, endpoint=True).astype(np.uint16)][1:-1]
+#add hairline to other pts
+dlib_pts = np.concatenate([dlib_pts, contour[:,::-1]], axis=0)
 
 #get normals for points
 norms = get_normals(dlib_pts)
@@ -760,15 +812,6 @@ morpher = Morpher(norms, pts)
 for demand in morph_demands.items():
     if demand[1] != 0:
         img, triangles = getattr(morpher, demand[0])(img, triangles, demand[1]) 
-
-#skin processing begins here
-face_triangles = make_face_triang(dlib_pts, (H,W))
-triang_mask = get_triang_mask(img.shape, face_triangles)
-
-# NN segmentation
-model = FCN()
-model.load_weights("Keras_FCN8s_face_seg_YuvalNirkin.h5")
-nn_mask = get_nn_mask(img, model)
 
 #get working masks
 face_mask = np.logical_or(triang_mask, nn_mask).astype(np.float32)
