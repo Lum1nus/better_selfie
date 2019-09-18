@@ -13,6 +13,7 @@ from skimage.color import rgb2hsv, hsv2rgb, rgb2yuv, yuv2rgb
 from skimage.exposure import equalize_hist, equalize_adapthist
 from skimage.measure import find_contours
 from matplotlib import pyplot as plt
+from glob import glob
 
 from keras.models import Sequential, Model
 from keras.layers import *
@@ -21,6 +22,7 @@ from keras.activations import relu
 from keras.initializers import RandomNormal
 from keras.applications import *
 import keras.backend as K
+import tensorflow as tf
 
 from FCN8s_keras import FCN
 
@@ -87,7 +89,7 @@ def get_face_bbox(image):
     if not len(faces):
         return None
     x, y, w, h = faces[0]
-    return x, y, x + w, y + h
+    return x - 30, y - 50, x + w + 30, y + h + 80
 
 def get_face_image(image):
     bbox = get_face_bbox(image)
@@ -578,7 +580,7 @@ class Morpher:
         self.pts = new_pts
         return imgMorphNorm.clip(0,255).astype(np.uint8), new_triangles
         
-    def forhead_height(self, img, triangles, k):
+    def forehead_height(self, img, triangles, k):
         new_pts = self.pts.copy()
         k = k / 10.
         img1 = np.float32(img.copy())
@@ -627,13 +629,13 @@ def get_nn_mask(img, model):
     bbox = get_face_bbox(img)
     if bbox is not None:
         x1, y1, x2, y2 = bbox
-        im = img[max(0,y1-50):min(y2+50,h), max(0,x1-30):min(x2+30,w)]
+        im = img[max(0,y1):min(y2,h), max(0,x1):min(x2,w)]
     inp_im = vgg_preprocess(im)
     out = model.predict([inp_im])
     out_resized = cv2.resize(np.squeeze(out), (im.shape[1],im.shape[0]))
     out_resized_clipped = np.clip(out_resized.argmax(axis=2), 0, 1).astype(np.float64)
     mask = np.zeros((h,w,1))
-    mask[max(0,y1-50):min(y2+50,h), max(0,x1-30):min(x2+30,w),:] = out_resized_clipped[:,:,np.newaxis]
+    mask[max(0,y1):min(y2,h), max(0,x1):min(x2,w),:] = out_resized_clipped[:,:,np.newaxis]
     return mask
 
 
@@ -701,6 +703,14 @@ def get_img_parts_masks(shape, pts_src):
     skin_mask = np.logical_and(face_mask, 1-eyeslips_mask).astype(np.float32)
     return eyes_mask, lips_mask, skin_mask
 
+
+def makeup_preprocess(img):
+    return (img / 255. - 0.5) * 2
+
+def makeup_deprocess(img):
+    return (img + 1) / 2
+
+
 class Stylist:
     def __init__(self, face, skin, eyes, lips):
         self.face = face
@@ -739,6 +749,39 @@ class Stylist:
         img_skcla = (equalize_adapthist(img, kernel_size=(faceH/5,faceW/3), clip_limit=0.001*k)*255).clip(0,255).astype(np.uint8)
         img_contr  = (img * (1-self.face_bl) + img_skcla * self.face_bl).clip(0,255).astype(np.uint8)
         return img_contr
+        
+    def makeup(self, img_full, k):
+        #~ K.clear_session()
+        H, W, _ = img_full.shape
+        bbox = get_face_bbox(img_full)
+        if bbox is not None:
+            x1, y1, x2, y2 = bbox
+            no_makeup = img_full[max(0,y1):min(y2, H), max(0,x1):min(x2, W)]
+            bbH, bbW, _ = no_makeup.shape
+        img_full = img_full / 255.
+        no_makeup = cv2.resize(no_makeup, (256, 256))
+        X_img = np.expand_dims(makeup_preprocess(no_makeup), 0)
+        makeups = glob(os.path.join('../BeautyGAN/imgs', 'makeup', '*.*'))
+        tf.reset_default_graph()
+        sess = tf.Session()
+        sess.run(tf.global_variables_initializer())
+        saver = tf.train.import_meta_graph(os.path.join('../BeautyGAN/model', 'model.meta'))
+        saver.restore(sess, tf.train.latest_checkpoint('../BeautyGAN/model'))
+        graph = tf.get_default_graph()
+        X = graph.get_tensor_by_name('X:0')
+        Y = graph.get_tensor_by_name('Y:0')
+        Xs = graph.get_tensor_by_name('generator/xs:0')
+        makeup = cv2.resize(io.imread(makeups[k-1]), (256, 256))
+        Y_img = np.expand_dims(makeup_preprocess(makeup), 0)
+        Xs_ = sess.run(Xs, feed_dict={X: X_img, Y: Y_img})
+        Xs_ = makeup_deprocess(Xs_)
+        dif = (Xs_[0] - no_makeup / 255.)
+        dif = cv2.resize(dif, (bbW, bbH))
+        mask = np.zeros_like(img_full)
+        mask[max(0,y1):min(y2, H), max(0,x1):min(x2, W)] = dif
+        mask = mask * self.face_bl
+        img_full += mask
+        return np.uint8(img_full.clip(0,1) * 255)
 
 
 #parsing cmdline arguments if needed
@@ -758,9 +801,10 @@ morph_demands = {'eyebrows': 0,
                  'skull_width': 0,
                  'jaw_width': 0,
                  'chin_height': 0,
-                 'forhead_height': 10}
+                 'forehead_height': 0}
 
-skin_demands = {'contrast': 0,
+skin_demands = {'makeup': 5,
+                'contrast': 0,
                 'skin_tone': 0,
                 'lips_tone': 0,
                 'smooth': 0}
@@ -784,9 +828,10 @@ face_triangles = make_face_triang(dlib_pts, (H,W))
 triang_mask = get_triang_mask(img.shape, face_triangles)
 
 # NN segmentation
-model = FCN()
-model.load_weights("Keras_FCN8s_face_seg_YuvalNirkin.h5")
-nn_mask = get_nn_mask(img, model)
+seg_model = FCN()
+seg_model.load_weights("Keras_FCN8s_face_seg_YuvalNirkin.h5")
+nn_mask = get_nn_mask(img, seg_model)
+K.clear_session()
 
 #get hairline from NN mask
 contour = find_contours(nn_mask[:,:,0], 0.5)[0].astype(np.int16)
@@ -807,21 +852,23 @@ for tr1 in morph_triangles:
     t1 = [(x1, y1), (x2, y2), (x3, y3)]
     triangles.append(t1)
 
-#morph step-by-step
-morpher = Morpher(norms, pts)
-for demand in morph_demands.items():
-    if demand[1] != 0:
-        img, triangles = getattr(morpher, demand[0])(img, triangles, demand[1]) 
-
 #get working masks
 face_mask = np.logical_or(triang_mask, nn_mask).astype(np.float32)
-eyes_mask, lips_mask, skin_mask = get_img_parts_masks(img.shape, morpher.pts)
+eyes_mask, lips_mask, skin_mask = get_img_parts_masks(img.shape, pts) #was morpher.pts
+
+#create beauty crew
+morpher = Morpher(norms, pts)
+stylist = Stylist(face_mask, skin_mask, eyes_mask, lips_mask)
 
 #process tone step-by-step
-stylist = Stylist(face_mask, skin_mask, eyes_mask, lips_mask)
 for demand in skin_demands.items():
     if demand[1] != 0:
         img = getattr(stylist, demand[0])(img, demand[1])
+
+#morph step-by-step better after stylist
+for demand in morph_demands.items():
+    if demand[1] != 0:
+        img, triangles = getattr(morpher, demand[0])(img, triangles, demand[1]) 
 
 #print the result
 cv2.imwrite(args.out, np.flip(img, 2))
