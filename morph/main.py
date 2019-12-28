@@ -255,13 +255,20 @@ def get_normals(pts):
     norms[33] = (-norm_y, -norm_x)
     
     #4head
-    for i in range(68, 75):
+    for i in range(69, 74):
         norm_x = pts[16][0] - pts[0][0]
         norm_y = pts[16][1] - pts[0][1]
         len1 = sqrt(norm_x*norm_x + norm_y*norm_y)
         norm_x /= len1
         norm_y /= len1
-        norms[i] = (-norm_y, -norm_x)
+        norms[i] = (norm_y, -norm_x)
+    norm_x = pts[68][0] - pts[74][0]
+    norm_y = pts[68][1] - pts[74][1]
+    len1 = sqrt(norm_x*norm_x + norm_y*norm_y)
+    norm_x /= len1
+    norm_y /= len1
+    norms[68] = ( norm_x,  norm_y)
+    norms[74] = (-norm_x, -norm_y)
     #finally return
     return norms
 
@@ -272,18 +279,22 @@ def img_sparse_triang(pts_src, size):
     for pt in pts_src:
         pts.append(tuple(pt))
     pts.append((0, 0))
-    pts.append((0, size[0] // 2))
+    pts.append((0, size[0] // 3))
+    pts.append((0, 2 * size[0] // 3))
     pts.append((0, size[0] - 1))
-    pts.append((size[1] // 2, size[0] - 1))
+    pts.append((size[1] // 3, size[0] - 1))
+    pts.append((2 * size[1] // 3, size[0] - 1))
     pts.append((size[1] - 1, size[0] - 1))
-    pts.append((size[1] - 1, size[0] // 2))
+    pts.append((size[1] - 1, size[0] // 3))
+    pts.append((size[1] - 1, 2 * size[0] // 3))
     pts.append((size[1] - 1, 0))
-    pts.append((size[1] // 2, 0))
+    pts.append((size[1] // 3, 0))
+    pts.append((2 * size[1] // 3, 0))
     # Insert points into subdiv
     for i in (1,4,7,9,12,15):
         subdiv.insert(pts[i])
     for i, p in enumerate(pts[17:]):
-        if i+17 not in (29, 32, 34, 60, 64, 68, 74):
+        if i+17 not in (29, 32, 34, 60, 64, 69, 73):
             subdiv.insert(p)
     triangles = subdiv.getTriangleList()
     return triangles, pts
@@ -594,9 +605,39 @@ class Morpher:
                     dist1 = sqrt((self.pts[70][0] - self.pts[19][0])**2 + (self.pts[70][1] - self.pts[19][1])**2)
                     dist2 = sqrt((self.pts[72][0] - self.pts[24][0])**2 + (self.pts[72][1] - self.pts[24][1])**2)
                     dist = 0.3 * (dist1 + dist2) / 2
-                    new_x = pt[0] + int(k * dist * norms[idx][0])
-                    new_y = pt[1] + int(k * dist * norms[idx][1])
+                    new_x = pt[0] + int(k * dist * self.norms[idx][0])
+                    new_y = pt[1] + int(k * dist * self.norms[idx][1])
                     t.append((new_x, new_y))
+                    new_pts[idx] = (new_x, new_y)
+                else:
+                    t.append(pt)
+            morphTriangle(img1, imgMorphNorm, t1, t, cv2.INTER_CUBIC)
+            new_triangles.append(t)
+        self.pts = new_pts
+        return imgMorphNorm.clip(0,255).astype(np.uint8), new_triangles
+    
+    def forehead_width(self, img, triangles, k):
+        new_pts = self.pts.copy()
+        k = k / 10.
+        img1 = np.float32(img.copy())
+        imgMorphNorm = np.zeros(img1.shape, dtype = img1.dtype)
+        new_triangles = []
+        for t1 in triangles:
+            t = []
+            for pt in t1:
+                idx = pts_ind(self.pts, pt)
+                if idx == 68:
+                    dist = 0.3 * sqrt((self.pts[1][0] - self.pts[36][0])**2 + (self.pts[1][1] - self.pts[36][1])**2)
+                    new_x = pt[0] + int(k * dist * self.norms[idx][0])
+                    new_y = pt[1] + int(k * dist * self.norms[idx][1])
+                    t.append((new_x, new_y))
+                    new_pts[idx] = (new_x, new_y)
+                elif idx == 74:
+                    dist = 0.3 * sqrt((self.pts[15][0] - self.pts[45][0])**2 + (self.pts[15][1] - self.pts[45][1])**2)
+                    new_x = pt[0] + int(k * dist * self.norms[idx][0])
+                    new_y = pt[1] + int(k * dist * self.norms[idx][1])
+                    t.append((new_x, new_y))
+                    new_pts[idx] = (new_x, new_y)
                 else:
                     t.append(pt)
             morphTriangle(img1, imgMorphNorm, t1, t, cv2.INTER_CUBIC)
@@ -645,7 +686,7 @@ def get_img_parts_masks(shape, pts_src):
     pts = []
     for pt in pts_src:
         pts.append(tuple(pt))
-    for i in range(36,42):
+    for i in range(36, 42):
         subdiv.insert(pts[i])
     triang4leye = subdiv.getTriangleList()
     leye_mask = np.zeros(shape, dtype=np.float32)
@@ -659,7 +700,7 @@ def get_img_parts_masks(shape, pts_src):
     pts = []
     for pt in pts_src:
         pts.append(tuple(pt))
-    for i in range(42,48):
+    for i in range(42, 48):
         subdiv.insert(pts[i])
     triang4reye = subdiv.getTriangleList()
     reye_mask = np.zeros(shape, dtype=np.float32)
@@ -696,12 +737,28 @@ def get_img_parts_masks(shape, pts_src):
         t = [(x1, y1), (x2, y2), (x3, y3)]
         r = cv2.boundingRect(np.float32([t]))
         cv2.fillConvexPoly(rlips_mask, np.int32(t), (1.0, 1.0, 1.0), 16, 0)
+    
+    subdiv = cv2.Subdiv2D(rect)
+    pts = []
+    for pt in pts_src:
+        pts.append(tuple(pt))
+    for i in range(60, 68):
+        subdiv.insert(pts[i])
+    triang4teeth = subdiv.getTriangleList()
+    teeth_mask = np.zeros(shape, dtype=np.float32)
+    for tr in triang4teeth:
+        x1, y1, x2, y2, x3, y3 = tr
+        t = [(x1, y1), (x2, y2), (x3, y3)]
+        r = cv2.boundingRect(np.float32([t]))
+        cv2.fillConvexPoly(teeth_mask, np.int32(t), (1.0, 1.0, 1.0), 16, 0)
 
     eyes_mask = np.logical_or(leye_mask, reye_mask).astype(np.float32)
     lips_mask = np.logical_or(llips_mask, rlips_mask).astype(np.float32)
     eyeslips_mask = np.logical_or(eyes_mask, lips_mask).astype(np.float32)
     skin_mask = np.logical_and(face_mask, 1-eyeslips_mask).astype(np.float32)
-    return eyes_mask, lips_mask, skin_mask
+    teeth_mask = cv2.morphologyEx(teeth_mask, cv2.MORPH_ERODE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(5,5)))
+    eyes_mask = cv2.morphologyEx(eyes_mask, cv2.MORPH_ERODE, cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(3,3)))
+    return eyes_mask, lips_mask, skin_mask, teeth_mask
 
 
 def makeup_preprocess(img):
@@ -712,14 +769,17 @@ def makeup_deprocess(img):
 
 
 class Stylist:
-    def __init__(self, face, skin, eyes, lips):
+    def __init__(self, face, skin, eyes, lips, teeth):
         self.face = face
         self.skin = skin
         self.eyes = eyes
         self.lips = lips
+        self.teeth = teeth
         self.smooth_mask = cv2.GaussianBlur(self.skin, (101,101), -1).clip(0,1)
         self.face_bl = cv2.GaussianBlur(face, (151,151), -1).clip(0,1)
         self.lips_bl = cv2.GaussianBlur(lips, (31,31), -1).clip(0,1)
+        self.eyes_bl = cv2.GaussianBlur(eyes, (11,11), -1).clip(0,1)
+        self.teeth_bl = cv2.GaussianBlur(teeth, (11,11), -1).clip(0,1)
         self.tone_mask = self.face_bl - cv2.GaussianBlur(eyes, (31,31), -1).clip(0,1) - self.lips_bl
     
     def smooth(self, img, k):
@@ -751,7 +811,6 @@ class Stylist:
         return img_contr
         
     def makeup(self, img_full, k):
-        #~ K.clear_session()
         H, W, _ = img_full.shape
         bbox = get_face_bbox(img_full)
         if bbox is not None:
@@ -776,12 +835,28 @@ class Stylist:
         Xs_ = sess.run(Xs, feed_dict={X: X_img, Y: Y_img})
         Xs_ = makeup_deprocess(Xs_)
         dif = (Xs_[0] - no_makeup / 255.)
-        dif = cv2.resize(dif, (bbW, bbH))
+        dif = cv2.resize(dif, (bbW, bbH), interpolation=cv2.INTER_CUBIC)
         mask = np.zeros_like(img_full)
         mask[max(0,y1):min(y2, H), max(0,x1):min(x2, W)] = dif
         mask = mask * self.face_bl
         img_full += mask
+        K.clear_session()
         return np.uint8(img_full.clip(0,1) * 255)
+    
+    def eyes_clarity(self, img, k):
+        img1 = np.float32(img.copy())
+        img_clar = ((img1 - img1[self.eyes.astype(np.bool)].min()) / 
+                    (np.percentile(img1[self.eyes.astype(np.bool)], 95) - img1[self.eyes.astype(np.bool)].min()) * 230).clip(0, 255)
+        img_clar = (img1 * (1-self.eyes_bl) + img_clar * self.eyes_bl).clip(0,255).astype(np.uint8)
+        return img_clar
+    
+    def teeth_whiten(self, img, k):
+        img_t = (0.299 * img[:,:,0] + 0.587 * img[:,:,1] + 0.114 * img[:,:,2])[:,:,np.newaxis] * 0.5 + img * 0.5
+        img_t = ((img_t - img_t[self.teeth.astype(np.bool)].min()) / 
+                 (np.percentile(img_t[self.teeth.astype(np.bool)], 80) - img_t[self.teeth.astype(np.bool)].min()) * 220).clip(0, 255)
+        img_t = (img * (1-self.teeth_bl) + img_t * self.teeth_bl).clip(0,255).astype(np.uint8)
+        return img_t
+        
 
 
 #parsing cmdline arguments if needed
@@ -793,21 +868,24 @@ args = parser.parse_args()
 #initialize the demands
 morph_demands = {'eyebrows': 0,
                  'eyes_size': 0,
-                 'nose_length': 0,
-                 'nose_width': 0,
-                 'smile_on': 0,
-                 'lips_thicc': 0,
-                 'lips_width': 0,
-                 'skull_width': 0,
-                 'jaw_width': 0,
-                 'chin_height': 0,
-                 'forehead_height': 0}
+                 'nose_length': 3,
+                 'nose_width': 3,
+                 'smile_on': 2,
+                 'lips_thicc': 3,
+                 'lips_width': 3,
+                 'skull_width': -5,
+                 'jaw_width': -5,
+                 'chin_height': -5,
+                 'forehead_height': -4,
+                 'forehead_width': -5}
 
-skin_demands = {'makeup': 5,
+style_demands = {'makeup': 0,
                 'contrast': 0,
                 'skin_tone': 0,
                 'lips_tone': 0,
-                'smooth': 0}
+                'smooth': 3,
+                'eyes_clarity': 1,
+                'teeth_whiten': 1}
 
 #read the input image and get its shape
 img = io.imread(args.input)
@@ -854,14 +932,14 @@ for tr1 in morph_triangles:
 
 #get working masks
 face_mask = np.logical_or(triang_mask, nn_mask).astype(np.float32)
-eyes_mask, lips_mask, skin_mask = get_img_parts_masks(img.shape, pts) #was morpher.pts
+eyes_mask, lips_mask, skin_mask, teeth_mask = get_img_parts_masks(img.shape, pts) #was morpher.pts
 
 #create beauty crew
 morpher = Morpher(norms, pts)
-stylist = Stylist(face_mask, skin_mask, eyes_mask, lips_mask)
+stylist = Stylist(face_mask, skin_mask, eyes_mask, lips_mask, teeth_mask)
 
 #process tone step-by-step
-for demand in skin_demands.items():
+for demand in style_demands.items():
     if demand[1] != 0:
         img = getattr(stylist, demand[0])(img, demand[1])
 
